@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hybrid Movie Recommender</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="p-4">
+    <h2>Hybrid Movie Recommendation System</h2>
+    <form id="recommend-form" class="mb-3">
+        <label for="user_id">Select UserID:</label>
+        <select id="user_id" name="user_id" class="form-select w-25">
+            {% for user in users %}
+            <option value="{{ user }}">{{ user }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-primary mt-2">Get Recommendations</button>
+    </form>
+
+    <div id="results"></div>
+
+    <script>
+        document.getElementById('recommend-form').addEventListener('submit', async function(e){
+            e.preventDefault();
+            const formData = new FormData(this);
+            const res = await fetch('/recommend', { method:'POST', body: formData });
+            const data = await res.json();
+            const div = document.getElementById('results');
+            div.innerHTML = '';
+            if(data.error){
+                div.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+            } else {
+                let html = '<h4>Top Recommendations:</h4><ul class="list-group">';
+                data.forEach(movie=>{
+                    html += `<li class="list-group-item">${movie.Title} (Score: ${movie.Score})</li>`;
+                });
+                html += '</ul>';
+                div.innerHTML = html;
+            }
+        });
+    </script>
+</body>
+</html>
