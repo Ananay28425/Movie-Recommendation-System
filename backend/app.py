@@ -2,18 +2,17 @@
 from flask import Flask, send_from_directory, request, jsonify, session
 import pandas as pd
 from hybrid import HybridRecommender
+from pathlib import Path
 
-app = Flask(
-    __name__,
-    static_folder="E:/PROGRAMMING-2/Movie-Recommendation-System/frontend",
-    static_url_path="E:/PROGRAMMING-2/Movie-Recommendation-System/frontend/assets"
-)
-app.secret_key = "change-this-to-a-strong-secret"  # set a real secret in prod
+BASE = Path("E:/PROGRAMMING-2/Movie-Recommendation-System")
+FRONTEND_DIR = BASE / "frontend"
+DATA_PATH = BASE / "movielens_100k.csv"
+
+app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="/")  # URL prefix must start with '/'
+app.secret_key = "change-this-to-a-strong-secret"  # TODO: put in env var for prod
 
 # ---- load data & build model once ----
-DATA_PATH = "E:/PROGRAMMING-2/Movie-Recommendation-System/movielens_100k.csv"
 df = pd.read_csv(DATA_PATH, encoding="latin-1")[['UserID','MovieID','Rating','Title','Genres']]
-
 movies_df  = df[['MovieID','Title','Genres']].drop_duplicates('MovieID').reset_index(drop=True)
 ratings_df = df[['UserID','MovieID','Rating']].copy()
 
@@ -29,7 +28,7 @@ def _get_feedback():
 def index():
     return send_from_directory(app.static_folder, "index.html")
 
-# (Optional: still available if you want to inspect IDs)
+# Optional helper to list user IDs
 @app.route("/users")
 def users():
     users = sorted(ratings_df['UserID'].dropna().astype(int).unique().tolist())
@@ -67,7 +66,6 @@ def recommend():
             session_dislikes=fb["dislikes"]
         )
 
-        # enrich each item with a human-readable breakdown
         enriched = []
         for r in results:
             expl = recommender.explain(user_id, r["MovieID"], fb["likes"])
@@ -78,7 +76,6 @@ def recommend():
                 "similar_title": expl["similar_title"],
                 "similarity": round(expl["similarity"], 3),
             })
-            # ready-to-show string if you prefer a single field:
             r["Why"] = (
                 f"High on {', '.join(expl['top_genres'])}; "
                 f"similar to '{expl['similar_title']}' (sim {r['similarity']}); "
