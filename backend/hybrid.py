@@ -18,52 +18,74 @@ class HybridRecommender:
         self.movies  = movies_df[['MovieID','Title','Genres']].drop_duplicates('MovieID').copy()
         self.ratings = ratings_df[['UserID','MovieID','Rating']].copy()
 
-        self.user_item_csr, self.user_ids, self.movie_ids, self.uid2idx, self.mid2idx = self._build_user_item(self.ratings)
+        # user-item and mappings
+        self.user_item_csr, self.user_ids, self.movie_ids, self.uid2idx, self.mid2idx = \
+            self._build_user_item(self.ratings)
+
+        # content features + similarity
         self.item_features = self._build_item_features(self.movies, self.movie_ids)
         self.content_sim   = self._build_content_sim(self.item_features)
+
+        # user-based KNN
         self.knn_user      = self._build_knn_user(self.user_item_csr)
-        self.rf_ovr        = self._build_multilabel_rf(self.item_features, self.movies[self.movies['MovieID'].isin(self.movie_ids)])
+
+        # multi-label RF on genres
+        self.rf_ovr        = self._build_multilabel_rf(
+            self.item_features,
+            self.movies[self.movies['MovieID'].isin(self.movie_ids)]
+        )
+
+        # precompute RF scores (per movie) ONCE
+        self._rf_scores    = self._precompute_rf_scores()
+
+        # convenience index
         self.movies_idx    = self.movies.set_index('MovieID')
 
-    # Build user-item matrix
+    # ---------- build matrices ----------
     def _build_user_item(self, ratings):
         ucat = pd.Categorical(ratings['UserID'])
         mcat = pd.Categorical(ratings['MovieID'])
         rows = ucat.codes.astype(np.int32)
         cols = mcat.codes.astype(np.int32)
         vals = ratings['Rating'].astype(np.float32).values
-        csr = csr_matrix((vals, (rows, cols)), shape=(len(ucat.categories), len(mcat.categories)), dtype=np.float32)
+
+        csr = csr_matrix(
+            (vals, (rows, cols)),
+            shape=(len(ucat.categories), len(mcat.categories)),
+            dtype=np.float32
+        )
         user_ids = pd.Index(ucat.categories.astype(int))
         movie_ids = pd.Index(mcat.categories.astype(int))
         uid2idx = {int(u): i for i, u in enumerate(user_ids)}
         mid2idx = {int(m): i for i, m in enumerate(movie_ids)}
         return csr, user_ids, movie_ids, uid2idx, mid2idx
 
-    # Building Item features(content features + similarity)
     def _build_item_features(self, movies, movie_ids):
         m = movies[movies['MovieID'].isin(movie_ids)].copy()
         m['Title'] = m['Title'].fillna('')
         m['Genres'] = m['Genres'].fillna('')
         m['content'] = m['Title'] + ' ' + m['Genres'].str.replace('|', ' ', regex=False)
-        tfidf = TfidfVectorizer(stop_words='english', max_features=4000)
+
+        # lighter, still enough for PBL
+        tfidf = TfidfVectorizer(stop_words='english', max_features=1500)
         X = tfidf.fit_transform(m['content'])
-        svd = TruncatedSVD(n_components=200, random_state=42)
+
+        svd = TruncatedSVD(n_components=80, random_state=42)
         R = svd.fit_transform(X).astype(np.float32)
+
         feats = pd.DataFrame(R, index=m['MovieID'])
         return feats.reindex(movie_ids).astype(np.float32)
 
-    # Build content similarity matrix
     def _build_content_sim(self, item_feats_df):
         sims = cosine_similarity(item_feats_df.values)
-        return sims.astype(np.float32)
+        return sims.astype(np.float32)   # (n_items, n_items)
 
-    # user-based KNN 
     def _build_knn_user(self, csr_mat):
         knn = NearestNeighbors(metric='cosine', algorithm='brute', n_neighbors=5)
         knn.fit(csr_mat)
         return knn
 
-    # multilabel RF on genres (content confidence) 
+    # ---------- RF for genre multilabel ----------
     def _build_multilabel_rf(self, item_feats_df, movies_sub):
         all_genres = sorted(set('|'.join(movies_sub['Genres'].fillna('')).split('|')) - {''})
         Y = pd.DataFrame(0, index=movies_sub['MovieID'], columns=all_genres)
@@ -72,31 +94,40 @@ class HybridRecommender:
                 if g:
                     Y.at[row['MovieID'], g] = 1
         X = item_feats_df.reindex(Y.index).values
-        rf = RandomForestClassifier(n_estimators=120, max_depth=14, n_jobs=-1, random_state=42) 
-        # rf = RandomForestClassifier(n_estimators=120, max_depth=14, n_jobs=-1, random_state=42)
+
+        rf = RandomForestClassifier(
+            n_estimators=120,
+            max_depth=14,
+            n_jobs=-1,
+            random_state=42
+        )
         ovr = OneVsRestClassifier(rf)
         ovr.fit(X, Y.values.astype(np.int32))
         self._genre_columns = list(Y.columns)
         return ovr
 
-    # RF Probablity
-    def _rf_prob(self, movie_idx):
-        proba_list = self.rf_ovr.predict_proba(self.item_features.values[[movie_idx]])
+    def _precompute_rf_scores(self):
+        """
+        Compute one RF confidence per movie ONCE.
+        """
+        proba_list = self.rf_ovr.predict_proba(self.item_features.values)
         if isinstance(proba_list, list):
-            pos_cols = [p[:, 1] for p in proba_list]
-            arr = np.stack(pos_cols, axis=1)
+            pos_cols = [p[:, 1] for p in proba_list]   # pos class proba
+            proba = np.stack(pos_cols, axis=1)         # (n_items, n_genres)
         else:
-            arr = proba_list
-        return float(arr.mean())
+            proba = proba_list                         # already (n_items, n_genres or 1)
+        return proba.mean(axis=1).astype(np.float32)   # (n_items,)
 
-    # Collaborative Filtering Score
+    # ---------- helpers ----------
+    def _rf_prob(self, movie_idx):
+        # now just index into precomputed vector
+        return float(self._rf_scores[movie_idx])
+
     def _cf_score(self, user_idx, movie_idx):
         _, nbr_idx = self.knn_user.kneighbors(self.user_item_csr[user_idx], n_neighbors=5)
         nbr_block = self.user_item_csr[nbr_idx[0]]
         return float(np.asarray(nbr_block.mean(axis=0))[0, movie_idx])
-    
-    
-    # Similarity to top liked movies
+
     def _top_similar_liked(self, movie_idx, liked_indices):
         if len(liked_indices) == 0:
             return None, 0.0
@@ -104,14 +135,21 @@ class HybridRecommender:
         j = int(np.argmax(sims))
         return int(liked_indices[j]), float(sims[j])
 
-    # Top genres of a movie
     def _genres(self, movie_id, top_k=2):
         gs = str(self.movies_idx.at[movie_id, 'Genres']).split('|')
         return [g for g in gs if g][:top_k] or ['General']
 
-    # Prediction for a user
-    def predict_for_user(self, user_id, top_n=5, w_content=0.4, w_collab=0.4, w_rf=0.2,
-                         session_likes=None, session_dislikes=None):
+    # ---------- main API ----------
+    def predict_for_user(
+        self,
+        user_id,
+        top_n=5,
+        w_content=0.4,
+        w_collab=0.4,
+        w_rf=0.2,
+        session_likes=None,
+        session_dislikes=None
+    ):
         if user_id not in self.uid2idx:
             return []
 
@@ -121,26 +159,22 @@ class HybridRecommender:
         uidx = self.uid2idx[user_id]
         u_vec = self.user_item_csr.getrow(uidx).toarray().astype(np.float32).ravel()
 
-        # 1) content score
+        # 1) content score: sim(item, all users' ratings)
         content_scores = self.content_sim @ u_vec
 
-        # 2) CF score (user-based neighbors)
+        # 2) CF score: average neighbor ratings
         _, nbr_idx = self.knn_user.kneighbors(self.user_item_csr[uidx], n_neighbors=5)
         nbr_block = self.user_item_csr[nbr_idx[0]]
         collab_scores = np.asarray(nbr_block.mean(axis=0)).ravel().astype(np.float32)
 
-        # 3) RF score
-        proba_list = self.rf_ovr.predict_proba(self.item_features.values)
-        if isinstance(proba_list, list):
-            pos_cols = [p[:, 1] for p in proba_list]
-            proba = np.stack(pos_cols, axis=1)
-        else:
-            proba = proba_list
-        rf_scores = proba.mean(axis=1).astype(np.float32)
+        # 3) RF score: precomputed confidence per movie
+        rf_scores = self._rf_scores
 
-        fused = (w_content*content_scores + w_collab*collab_scores + w_rf*rf_scores)
+        fused = (w_content * content_scores +
+                 w_collab * collab_scores +
+                 w_rf     * rf_scores)
 
-        # session nudge
+        # session-based nudge (like/dislike)
         like_idxs    = np.array([self.mid2idx[m] for m in session_likes if m in self.mid2idx], dtype=np.int32)
         dislike_idxs = np.array([self.mid2idx[m] for m in session_dislikes if m in self.mid2idx], dtype=np.int32)
 
@@ -151,6 +185,7 @@ class HybridRecommender:
             penalty = self.content_sim[:, dislike_idxs].max(axis=1)
             fused -= 0.4 * penalty
 
+        # do not recommend already rated movies
         rated_mask = u_vec > 0
         fused[rated_mask] = -np.inf
 
@@ -161,25 +196,46 @@ class HybridRecommender:
         for mi in top_idx:
             mid = int(self.movie_ids[mi])
             title = self.movies_idx.at[mid, 'Title'] if mid in self.movies_idx.index else str(mid)
-            out.append({"MovieID": mid, "Title": title, "Score": float(round(fused[mi], 3))})
+            out.append({
+                "MovieID": mid,
+                "Title": title,
+                "Score": float(round(fused[mi], 3))
+            })
         return out
-    
-    # Explanation for a recommendation
+
     def explain(self, user_id, movie_id, session_likes=None):
         session_likes = session_likes or []
         if user_id not in self.uid2idx or movie_id not in self.mid2idx:
-            return {"prob": 0.0, "cf_score": 0.0, "top_genres": [], "similar_title": "N/A", "similarity": 0.0}
+            return {
+                "prob": 0.0,
+                "cf_score": 0.0,
+                "top_genres": [],
+                "similar_title": "N/A",
+                "similarity": 0.0
+            }
 
         uidx = self.uid2idx[user_id]
         midx = self.mid2idx[movie_id]
+
         prob = self._rf_prob(midx)
         cf   = self._cf_score(uidx, midx)
 
-        liked_train = self.ratings[(self.ratings['UserID']==user_id) & (self.ratings['Rating']>=4)]['MovieID'].tolist()
+        liked_train = self.ratings[
+            (self.ratings['UserID'] == user_id) &
+            (self.ratings['Rating'] >= 4)
+        ]['MovieID'].tolist()
         liked_all = list({*liked_train, *(session_likes or [])})
         liked_idx = [self.mid2idx[m] for m in liked_all if m in self.mid2idx]
-        sim_idx, sim_val = self._top_similar_liked(midx, np.array(liked_idx, dtype=np.int32))
-        sim_title = self.movies_idx.at[int(self.movie_ids[sim_idx]), 'Title'] if sim_idx is not None else "your liked titles"
+
+        sim_idx, sim_val = self._top_similar_liked(
+            midx,
+            np.array(liked_idx, dtype=np.int32)
+        )
+        sim_title = (
+            self.movies_idx.at[int(self.movie_ids[sim_idx]), 'Title']
+            if sim_idx is not None else
+            "your liked titles"
+        )
 
         return {
             "prob": prob,

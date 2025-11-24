@@ -3,42 +3,69 @@ from flask import Flask, send_from_directory, request, jsonify, session
 import pandas as pd
 from hybrid import HybridRecommender
 from pathlib import Path
+import os
 
 BASE = Path("E:/PROGRAMMING-2/Movie-Recommendation-System")
 FRONTEND_DIR = BASE / "frontend"
 DATA_PATH = BASE / "movielens_100k.csv"
 
-app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="/")  # URL prefix must start with '/'
+# IMPORTANT: static_url_path should NOT be "/"
+# Use "/static" so URLs like /sample-movies go to real routes, not the static handler
+app = Flask(
+    __name__,
+    static_folder=str(FRONTEND_DIR),
+    static_url_path="/static"
+)
+
+app.config["SECRET_KEY"] = os.environ.get(
+    "FLASK_SECRET_KEY",
+    "THIS_IS_A_DEV_SECRET_CHANGE_LATER"
+)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 
 # ---- load data & build model once ----
-df = pd.read_csv(DATA_PATH, encoding="latin-1")[['UserID','MovieID','Rating','Title','Genres']]
-movies_df  = df[['MovieID','Title','Genres']].drop_duplicates('MovieID').reset_index(drop=True)
-ratings_df = df[['UserID','MovieID','Rating']].copy()
+df = pd.read_csv(DATA_PATH, encoding="latin-1")[['UserID', 'MovieID', 'Rating', 'Title', 'Genres']]
+movies_df = df[['MovieID', 'Title', 'Genres']].drop_duplicates('MovieID').reset_index(drop=True)
+ratings_df = df[['UserID', 'MovieID', 'Rating']].copy()
 
 recommender = HybridRecommender(movies_df, ratings_df)
 
+
 def _get_feedback():
     fb = session.get("feedback", {"likes": [], "dislikes": []})
-    fb["likes"]    = list({int(x) for x in fb.get("likes", [])})
+    fb["likes"] = list({int(x) for x in fb.get("likes", [])})
     fb["dislikes"] = list({int(x) for x in fb.get("dislikes", []) if x not in fb["likes"]})
     return fb
 
+
 @app.route("/")
 def index():
+    # serve frontend/index.html
     return send_from_directory(app.static_folder, "index.html")
 
-# Optional helper to list user IDs
+
 @app.route("/users")
 def users():
     users = sorted(ratings_df['UserID'].dropna().astype(int).unique().tolist())
     return jsonify(users)
 
-# ---- feedback: store in session (no DB) ----
+
+# sample movies for "Rate Movies" tab
+@app.route("/sample-movies")
+def sample_movies():
+    sample = (
+        movies_df
+        .sample(n=10, random_state=42)
+        .to_dict(orient="records")
+    )
+    return jsonify(sample)
+
+
 @app.route("/feedback", methods=["POST"])
 def feedback():
     payload = request.get_json(silent=True) or {}
     movie_id = int(payload.get("movie_id"))
-    like     = int(payload.get("like", 1))  # 1=like, 0=dislike
+    like = int(payload.get("like", 1))  # 1=like, 0=dislike
     fb = _get_feedback()
     if like:
         fb["likes"].append(movie_id)
@@ -49,13 +76,13 @@ def feedback():
     session["feedback"] = fb
     return jsonify({"ok": True, "feedback": fb})
 
-# ---- recommend with light personalization from session feedback ----
+
 @app.route("/recommend", methods=["POST"])
 def recommend():
     try:
         payload = request.form if request.form else (request.get_json(silent=True) or {})
         user_id = int(payload.get("user_id"))
-        top_n   = int(payload.get("top_n", 5))
+        top_n = int(payload.get("top_n", 5))
 
         fb = _get_feedback()
         results = recommender.predict_for_user(
@@ -85,6 +112,7 @@ def recommend():
         return jsonify(enriched)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
