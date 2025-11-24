@@ -9,7 +9,6 @@ FRONTEND_DIR = BASE / "frontend"
 DATA_PATH = BASE / "movielens_100k.csv"
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="/")  # URL prefix must start with '/'
-app.secret_key = "change-this-to-a-strong-secret"  # TODO: put in env var for prod
 
 # ---- load data & build model once ----
 df = pd.read_csv(DATA_PATH, encoding="latin-1")[['UserID','MovieID','Rating','Title','Genres']]
