@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Tuple
+from urllib.request import urlopen
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -18,9 +21,7 @@ class HybridRecommender:
     """
     Hybrid recommender for MovieLens-style data.
 
-    Compatible with:
-    - Flask backend import usage
-    - Direct CLI execution for evaluation output
+    Trained once on ratings; live feedback is handled separately by the API.
 
     Expected columns:
     movies_df: MovieID, Title, Genres
@@ -49,7 +50,10 @@ class HybridRecommender:
 
         # Build the matrix first. Everything else depends on this.
         self.user_item_matrix = self._create_user_item_matrix()
-        self.user_item_sparse = csr_matrix(self.user_item_matrix.values.astype(np.float32))
+        values = self.user_item_matrix.values.astype(np.float32)
+        counts = (values > 0).sum(axis=1)
+        means = np.divide(values.sum(axis=1), counts, out=np.zeros(len(values), dtype=np.float32), where=counts > 0)
+        self.user_item_sparse = csr_matrix(np.where(values > 0, values - means[:, None], 0.0))
 
         # Item features and models
         self.item_features = self._build_tfidf_features()
@@ -267,7 +271,8 @@ class HybridRecommender:
         user_ratings = self.user_item_matrix.loc[user_id].values.astype(float)
         user_mean = self._positive_mean(user_ratings)
 
-        centered_user = (user_ratings - user_mean).reshape(1, -1)
+        # Missing ratings are zero, not negative ratings relative to the mean.
+        centered_user = np.where(user_ratings > 0, user_ratings - user_mean, 0.0).reshape(1, -1)
 
         n_neighbors = min(self.knn.n_neighbors, self.user_item_matrix.shape[0])
         n_neighbors = max(1, n_neighbors)
@@ -278,17 +283,12 @@ class HybridRecommender:
 
         neighbors = self.user_item_matrix.iloc[indices.flatten()].values.astype(float)
         neighbor_means = np.array([self._positive_mean(row) for row in neighbors], dtype=float)
-        centered_neighbors = neighbors - neighbor_means[:, None]
-
+        observed = neighbors > 0
+        centered_neighbors = np.where(observed, neighbors - neighbor_means[:, None], 0.0)
         weighted = np.dot(sims, centered_neighbors)
-        denom = float(sims.sum()) + 1e-8
-
-        if denom <= 1e-12:
-            vec = np.full(len(self.movie_ids), self._fallback_rating(user_id=user_id), dtype=float)
-            self._cf_cache[user_id] = vec
-            return vec
-
-        preds = user_mean + (weighted / denom)
+        # Normalize per movie, using only neighbors who rated that movie.
+        denom = np.dot(sims, observed.astype(float))
+        preds = user_mean + np.divide(weighted, denom, out=np.zeros_like(weighted), where=denom > 1e-12)
         preds = np.clip(preds, 1.0, 5.0)
 
         self._cf_cache[user_id] = preds
@@ -315,11 +315,11 @@ class HybridRecommender:
             return {
                 "ContentScore": fallback,
                 "CollaborativeScore": fallback,
-                "ClassifierScore": fallback,
+                "RegressorScore": fallback,
                 "HybridScore": fallback,
                 "WeightContent": 0.0,
                 "WeightCollaborative": 0.0,
-                "WeightClassifier": 1.0,
+                "WeightRegressor": 1.0,
             }
 
         idx = self.movie_index[movie_id]
@@ -333,7 +333,7 @@ class HybridRecommender:
         return {
             "ContentScore": float(round(content_vec[idx], 4)),
             "CollaborativeScore": float(round(cf_vec[idx], 4)),
-            "ClassifierScore": float(round(rf_vec[idx], 4)),
+            "RegressorScore": float(round(rf_vec[idx], 4)),
             "HybridScore": float(round(
                 (w_content * content_vec[idx]) +
                 (w_cf * cf_vec[idx]) +
@@ -342,7 +342,7 @@ class HybridRecommender:
             )),
             "WeightContent": float(round(w_content, 4)),
             "WeightCollaborative": float(round(w_cf, 4)),
-            "WeightClassifier": float(round(w_rf, 4)),
+            "WeightRegressor": float(round(w_rf, 4)),
         }
 
     def predict_rating(self, user_id: int, movie_id: int) -> float:
@@ -351,7 +351,7 @@ class HybridRecommender:
 
     def _build_explanation(self, content_score: float, cf_score: float, rf_score: float, w_content: float, w_cf: float, w_rf: float) -> str:
         strongest = max(
-            [("content", content_score), ("collaborative", cf_score), ("classifier", rf_score)],
+            [("content", content_score), ("collaborative", cf_score), ("regressor", rf_score)],
             key=lambda x: x[1],
         )[0]
 
@@ -361,7 +361,7 @@ class HybridRecommender:
         elif strongest == "collaborative":
             parts.append("collaborative signal is strongest")
         else:
-            parts.append("classifier signal is strongest")
+            parts.append("Random Forest signal is strongest")
 
         if w_rf >= max(w_content, w_cf):
             parts.append("RF is weighted highest for stability")
@@ -402,7 +402,7 @@ class HybridRecommender:
                     "FinalScore": float(round(final_scores[idx], 4)),
                     "ContentScore": float(round(content_vec[idx], 4)),
                     "CollaborativeScore": float(round(cf_vec[idx], 4)),
-                    "ClassifierScore": float(round(rf_vec[idx], 4)),
+                    "RegressorScore": float(round(rf_vec[idx], 4)),
                     "Explanation": self._build_explanation(
                         content_vec[idx],
                         cf_vec[idx],
@@ -414,7 +414,7 @@ class HybridRecommender:
                 }
             )
 
-        recommendations.sort(key=lambda x: x["FinalScore"], reverse=True)
+        recommendations.sort(key=lambda x: (-x["FinalScore"], x["MovieID"]))
         return recommendations[:top_n]
 
     def evaluate(self, test_ratings: pd.DataFrame) -> Dict[str, float]:
@@ -425,8 +425,8 @@ class HybridRecommender:
                 "Content_MAE": np.nan,
                 "Collaborative_RMSE": np.nan,
                 "Collaborative_MAE": np.nan,
-                "Classifier_RMSE": np.nan,
-                "Classifier_MAE": np.nan,
+                "Regressor_RMSE": np.nan,
+                "Regressor_MAE": np.nan,
                 "Hybrid_RMSE": np.nan,
                 "Hybrid_MAE": np.nan,
                 "TestRows": 0,
@@ -472,8 +472,8 @@ class HybridRecommender:
                 "Content_MAE": np.nan,
                 "Collaborative_RMSE": np.nan,
                 "Collaborative_MAE": np.nan,
-                "Classifier_RMSE": np.nan,
-                "Classifier_MAE": np.nan,
+                "Regressor_RMSE": np.nan,
+                "Regressor_MAE": np.nan,
                 "Hybrid_RMSE": np.nan,
                 "Hybrid_MAE": np.nan,
                 "TestRows": int(len(test_ratings)),
@@ -488,14 +488,60 @@ class HybridRecommender:
             "Content_MAE": float(mean_absolute_error(actuals_arr, np.asarray(content_preds))),
             "Collaborative_RMSE": float(np.sqrt(mean_squared_error(actuals_arr, np.asarray(cf_preds)))),
             "Collaborative_MAE": float(mean_absolute_error(actuals_arr, np.asarray(cf_preds))),
-            "Classifier_RMSE": float(np.sqrt(mean_squared_error(actuals_arr, np.asarray(rf_preds)))),
-            "Classifier_MAE": float(mean_absolute_error(actuals_arr, np.asarray(rf_preds))),
+            "Regressor_RMSE": float(np.sqrt(mean_squared_error(actuals_arr, np.asarray(rf_preds)))),
+            "Regressor_MAE": float(mean_absolute_error(actuals_arr, np.asarray(rf_preds))),
             "Hybrid_RMSE": float(np.sqrt(mean_squared_error(actuals_arr, np.asarray(hybrid_preds)))),
             "Hybrid_MAE": float(mean_absolute_error(actuals_arr, np.asarray(hybrid_preds))),
             "TestRows": int(len(test_ratings)),
             "EvaluatedRows": int(evaluated_rows),
         }
         return metrics
+
+
+GENRES = (
+    "Unknown", "Action", "Adventure", "Animation", "Children's", "Comedy",
+    "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror",
+    "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western",
+)
+MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
+
+
+def download_movielens_data(csv_path: str | Path) -> None:
+    """Download from GroupLens and build a local CSV; their terms forbid redistribution."""
+    csv_path = Path(csv_path)
+    if csv_path.exists():
+        return
+    try:
+        local_zip = csv_path.parent / "ml-100k.zip"
+        if local_zip.exists():
+            archive = ZipFile(local_zip)
+        else:
+            with urlopen(MOVIELENS_URL, timeout=60) as response:
+                archive = ZipFile(BytesIO(response.read()))
+        with archive:
+            ratings = pd.read_csv(
+                archive.open("ml-100k/u.data"), sep="\t", header=None,
+                names=["UserID", "MovieID", "Rating", "Timestamp"],
+            )
+            items = pd.read_csv(
+                archive.open("ml-100k/u.item"), sep="|", header=None,
+                names=["MovieID", "Title", "Release", "VideoRelease", "URL", *GENRES],
+                encoding="latin-1",
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download MovieLens 100K from {MOVIELENS_URL}. "
+            f"Download ml-100k.zip from GroupLens and place it at {csv_path.parent / 'ml-100k.zip'}, then restart."
+        ) from exc
+
+    items["Genres"] = items.apply(
+        lambda row: "|".join(genre for genre in GENRES if row[genre] == 1), axis=1
+    )
+    data = ratings.merge(items[["MovieID", "Title", "Genres"]], on="MovieID", validate="many_to_one")
+    if len(data) != 100_000:
+        raise ValueError(f"Expected 100,000 MovieLens ratings, got {len(data)}")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    data[["UserID", "MovieID", "Rating", "Title", "Genres"]].to_csv(csv_path, index=False)
 
 
 def load_movielens_data(csv_path: str | Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -560,7 +606,7 @@ def print_metrics(metrics: Dict[str, float]) -> None:
     print("-" * 78)
     print(f"Content Based   -> RMSE: {metrics['Content_RMSE']:.4f} | MAE: {metrics['Content_MAE']:.4f}")
     print(f"Collaborative   -> RMSE: {metrics['Collaborative_RMSE']:.4f} | MAE: {metrics['Collaborative_MAE']:.4f}")
-    print(f"Random Forest   -> RMSE: {metrics['Classifier_RMSE']:.4f} | MAE: {metrics['Classifier_MAE']:.4f}")
+    print(f"Random Forest   -> RMSE: {metrics['Regressor_RMSE']:.4f} | MAE: {metrics['Regressor_MAE']:.4f}")
     print(f"Hybrid          -> RMSE: {metrics['Hybrid_RMSE']:.4f} | MAE: {metrics['Hybrid_MAE']:.4f}")
     print("=" * 78 + "\n")
 
@@ -571,7 +617,7 @@ def main() -> None:
         "--csv",
         type=str,
         default=None,
-        help="Path to movielens_100k.csv. Default is project_root/movielens_100k.csv",
+        help="Path to movielens_100k.csv. Default is project_root/data/movielens_100k.csv",
     )
     parser.add_argument("--test-size", type=float, default=0.2, help="Test split ratio.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -580,10 +626,11 @@ def main() -> None:
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
-    default_csv = script_dir.parent / "movielens_100k.csv"
+    default_csv = script_dir.parent / "data" / "movielens_100k.csv"
     csv_path = Path(args.csv) if args.csv else default_csv
 
     print("Loading dataset...")
+    download_movielens_data(csv_path)
     movies, ratings = load_movielens_data(csv_path)
 
     train_ratings, test_ratings = train_test_split_ratings(
@@ -622,7 +669,7 @@ def main() -> None:
             f"Final: {rec['FinalScore']:.4f} | "
             f"CBF: {rec['ContentScore']:.4f} | "
             f"CF: {rec['CollaborativeScore']:.4f} | "
-            f"RF: {rec['ClassifierScore']:.4f} | "
+            f"RF: {rec['RegressorScore']:.4f} | "
             f"{rec['Explanation']}"
         )
 

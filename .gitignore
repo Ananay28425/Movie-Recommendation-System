@@ -1,3 +1,15 @@
-/hybrid.py
-/movielens_100k.csv
-/hybrid_old.ipynb
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+node_modules/
+frontend/dist/
+.vite/
+.pytest_cache/
+.idea/
+.vscode/
+.DS_Store
+# MovieLens 100K license forbids redistributing the downloaded data.
+/data/movielens_100k.csv
+/data/ml-100k.zip
