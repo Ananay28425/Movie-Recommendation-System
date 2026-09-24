@@ -1,8 +1,10 @@
+// Purpose: render the one-page movie discovery and feedback experience.
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
 async function api(path, options) {
+  // Send an API request and turn server errors into readable UI messages.
   const response = await fetch(path, options)
   const data = await response.json()
   if (!response.ok) {
@@ -13,6 +15,7 @@ async function api(path, options) {
 }
 
 function App() {
+  // Hold the state needed to render profiles, rankings, and feedback.
   const [input, setInput] = useState('54')
   const [activeUser, setActiveUser] = useState(null)
   const [result, setResult] = useState(null)
@@ -24,6 +27,7 @@ function App() {
   const [error, setError] = useState('')
 
   async function load(userId, oldResult = null) {
+    // Fetch the ranked list and remember earlier scores and positions.
     setBusy(true)
     setError('')
     try {
@@ -44,11 +48,13 @@ function App() {
     }
   }
 
+  // Check the API and load the default profile when the page first mounts.
   useEffect(() => {
     api('/api/health').then(() => setStatus('online')).catch(() => setStatus('offline'))
     load(54)
   }, [])
 
+  // Clear the feedback confirmation after it has been visible briefly.
   useEffect(() => {
     if (!notice) return
     const timer = window.setTimeout(() => setNotice(''), 4500)
@@ -56,6 +62,7 @@ function App() {
   }, [notice])
 
   function submit(event) {
+    // Validate the selected user ID before loading that profile.
     event.preventDefault()
     const id = Number(input)
     if (!Number.isInteger(id) || id < 1) {
@@ -68,6 +75,7 @@ function App() {
   }
 
   async function feedback(movie, signal) {
+    // Save the signal and immediately reload recommendations.
     setBusy(true)
     setError('')
     try {

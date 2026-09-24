@@ -19,6 +19,7 @@ feedback_lock = Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load the official data, train the model once, and cache normalized movie features.
     download_movielens_data(DATA_PATH)
     movies, ratings = load_movielens_data(DATA_PATH)
     if len(ratings) != 100_000 or ratings["UserID"].nunique() != 943 or len(movies) != 1_682:
@@ -39,6 +40,7 @@ app.add_middleware(
 )
 
 
+# Validate the feedback payload fields and allowed signal values.
 class Feedback(BaseModel):
     user_id: int = Field(gt=0, strict=True)
     movie_id: int = Field(gt=0, strict=True)
@@ -46,6 +48,7 @@ class Feedback(BaseModel):
 
 
 def taste_profile(model: HybridRecommender, likes: set[int], dislikes: set[int]) -> dict:
+    # Summarize likes and rejects as deterministic genre counts.
     scores: Counter[str] = Counter()
     for movie_id, weight in [(mid, 1) for mid in likes] + [(mid, -1) for mid in dislikes]:
         for genre in str(model.movie_lookup.loc[movie_id, "Genres"]).split("|"):
@@ -57,6 +60,7 @@ def taste_profile(model: HybridRecommender, likes: set[int], dislikes: set[int])
 
 @app.get("/api/health")
 def health():
+    # Report whether the API process is responding.
     return {"status": "ok"}
 
 
@@ -65,6 +69,7 @@ def recommendations(
     user_id: int = PathParam(gt=0),
     limit: int = Query(default=6, ge=1, le=24),
 ):
+    # Combine the base ranking with stored feedback and return the top unseen movies.
     model: HybridRecommender = app.state.model
     if user_id not in model.user_index:
         raise HTTPException(status_code=404, detail=f"User {user_id} is not in MovieLens 100K (valid IDs: 1–943).")
@@ -121,6 +126,7 @@ def recommendations(
 
 @app.post("/api/feedback")
 def feedback(payload: Feedback):
+    # Validate and store a user's latest signal, replacing any opposite signal.
     model: HybridRecommender = app.state.model
     if payload.user_id not in model.user_index:
         raise HTTPException(status_code=404, detail="Unknown MovieLens user ID.")

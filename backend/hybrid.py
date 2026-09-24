@@ -1,3 +1,5 @@
+"""Hybrid MovieLens scoring model and local data and evaluation utilities."""
+
 from __future__ import annotations
 
 import argparse
@@ -29,6 +31,7 @@ class HybridRecommender:
     """
 
     def __init__(self, movies_df: pd.DataFrame, ratings_df: pd.DataFrame, random_state: int = 42):
+        # Prepare the data, fit model components once, and initialize prediction caches.
         self.random_state = random_state
 
         self.movies = movies_df.copy()
@@ -70,6 +73,7 @@ class HybridRecommender:
         self._hybrid_cache: Dict[int, np.ndarray] = {}
 
     def _validate_and_prepare_data(self) -> None:
+        # Check required columns and normalize IDs, ratings, and movie text.
         required_movie_cols = {"MovieID", "Title", "Genres"}
         required_rating_cols = {"UserID", "MovieID", "Rating"}
 
@@ -106,6 +110,7 @@ class HybridRecommender:
         self.movies["Genres"] = self.movies["Genres"].fillna("").astype(str)
 
     def _create_user_item_matrix(self) -> pd.DataFrame:
+        # Pivot ratings into a user-by-movie matrix with zero for unrated items.
         matrix = self.ratings.pivot_table(
             index="UserID",
             columns="MovieID",
@@ -117,6 +122,7 @@ class HybridRecommender:
         return matrix
 
     def _build_tfidf_features(self) -> np.ndarray:
+        # Encode titles and genres with TF-IDF, then reduce the feature dimensions.
         content_series = (
             self.movies["Title"].fillna("").astype(str)
             + " "
@@ -143,6 +149,7 @@ class HybridRecommender:
         return np.asarray(reduced, dtype=np.float32)
 
     def _train_knn(self) -> NearestNeighbors:
+        # Fit cosine KNN over centered user rating vectors.
         n_neighbors = min(20, len(self.user_ids))
         n_neighbors = max(1, n_neighbors)
 
@@ -151,6 +158,7 @@ class HybridRecommender:
         return model
 
     def _train_random_forest(self) -> RandomForestRegressor:
+        # Train a rating regressor from movie features and known ratings.
         X = []
         y = []
 
@@ -178,9 +186,11 @@ class HybridRecommender:
         return model
 
     def _clip_rating(self, value: float) -> float:
+        # Keep one predicted rating within the MovieLens 1-to-5 range.
         return float(np.clip(value, 1.0, 5.0))
 
     def _fallback_rating(self, user_id: int | None = None, movie_id: int | None = None) -> float:
+        # Choose a known user, movie, or global average when a model signal is missing.
         if user_id is not None and user_id in self.user_mean_rating:
             return self._clip_rating(self.user_mean_rating[user_id])
         if movie_id is not None and movie_id in self.movie_mean_rating:
@@ -188,6 +198,7 @@ class HybridRecommender:
         return self._clip_rating(self.global_mean_rating)
 
     def _scale_to_rating_scale(self, arr: np.ndarray, fallback: float | None = None) -> np.ndarray:
+        # Map arbitrary scores to the rating scale, with a safe constant fallback.
         arr = np.asarray(arr, dtype=float)
 
         if arr.size == 0 or not np.isfinite(arr).any():
@@ -205,11 +216,13 @@ class HybridRecommender:
         return np.clip(scaled, 1.0, 5.0)
 
     def _get_user_ratings_vector(self, user_id: int) -> np.ndarray:
+        # Return one user's ratings aligned to the model's sorted movie IDs.
         if user_id in self.user_item_matrix.index:
             return self.user_item_matrix.loc[user_id].values.astype(float)
         return np.zeros(len(self.movie_ids), dtype=float)
 
     def _get_weights_for_user(self, user_id: int) -> Tuple[float, float, float]:
+        # Choose hybrid component weights based on the user's rating history.
         if user_id not in self.user_item_matrix.index:
             return 0.10, 0.10, 0.80
 
@@ -223,6 +236,7 @@ class HybridRecommender:
         return 0.10, 0.25, 0.65
 
     def _predict_content_vector(self, user_id: int) -> np.ndarray:
+        # Build a weighted profile from rated movies and score all movie features.
         if user_id in self._content_cache:
             return self._content_cache[user_id]
 
@@ -254,12 +268,14 @@ class HybridRecommender:
         return vec
 
     def _positive_mean(self, row: np.ndarray) -> float:
+        # Average only the observed positive ratings in one user row.
         positive = row[row > 0]
         if positive.size == 0:
             return self.global_mean_rating
         return float(positive.mean())
 
     def _predict_cf_vector(self, user_id: int) -> np.ndarray:
+        # Predict ratings from similar users' observed rating deviations.
         if user_id in self._cf_cache:
             return self._cf_cache[user_id]
 
@@ -295,6 +311,7 @@ class HybridRecommender:
         return preds
 
     def _predict_hybrid_vector(self, user_id: int) -> np.ndarray:
+        # Blend content, collaborative, and Random Forest predictions.
         if user_id in self._hybrid_cache:
             return self._hybrid_cache[user_id]
 
@@ -310,6 +327,7 @@ class HybridRecommender:
         return final_vec
 
     def predict_components(self, user_id: int, movie_id: int) -> Dict[str, float]:
+        # Return each model component and the weighted base score for one movie.
         if movie_id not in self.movie_index:
             fallback = self._fallback_rating(user_id=user_id, movie_id=movie_id)
             return {
@@ -346,10 +364,12 @@ class HybridRecommender:
         }
 
     def predict_rating(self, user_id: int, movie_id: int) -> float:
+        # Return one user's clipped hybrid score for one movie.
         comp = self.predict_components(user_id, movie_id)
         return self._clip_rating(comp["HybridScore"])
 
     def _build_explanation(self, content_score: float, cf_score: float, rf_score: float, w_content: float, w_cf: float, w_rf: float) -> str:
+        # Describe the strongest score signal and the component with the largest weight.
         strongest = max(
             [("content", content_score), ("collaborative", cf_score), ("regressor", rf_score)],
             key=lambda x: x[1],
@@ -373,6 +393,7 @@ class HybridRecommender:
         return "; ".join(parts)
 
     def predict_for_user(self, user_id: int, top_n: int = 5) -> List[Dict[str, float | int | str]]:
+        # Rank movies the user has not rated and return their score details.
         if user_id not in self.user_item_matrix.index and user_id not in self.user_mean_rating:
             return []
 
@@ -418,6 +439,7 @@ class HybridRecommender:
         return recommendations[:top_n]
 
     def evaluate(self, test_ratings: pd.DataFrame) -> Dict[str, float]:
+        # Compare component and hybrid predictions with held-out ratings.
         if test_ratings.empty:
             return {
                 "Coverage": 0.0,
@@ -508,6 +530,7 @@ MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
 
 def download_movielens_data(csv_path: str | Path) -> None:
     """Download from GroupLens and build a local CSV; their terms forbid redistribution."""
+    # Download MovieLens 100K when needed and convert it to the app's CSV format.
     csv_path = Path(csv_path)
     if csv_path.exists():
         return
@@ -545,6 +568,7 @@ def download_movielens_data(csv_path: str | Path) -> None:
 
 
 def load_movielens_data(csv_path: str | Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # Read the CSV and return cleaned movie and rating tables.
     csv_path = Path(csv_path)
 
     if not csv_path.exists():
@@ -584,6 +608,7 @@ def train_test_split_ratings(
     test_size: float = 0.2,
     random_state: int = 42,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # Split ratings reproducibly into training and evaluation rows.
     if not 0.0 < test_size < 1.0:
         raise ValueError("test_size must be between 0 and 1")
 
@@ -597,6 +622,7 @@ def train_test_split_ratings(
 
 
 def print_metrics(metrics: Dict[str, float]) -> None:
+    # Print the evaluation coverage and rating error metrics.
     print("\n" + "=" * 78)
     print("HYBRID RECOMMENDER EVALUATION")
     print("=" * 78)
@@ -612,6 +638,7 @@ def print_metrics(metrics: Dict[str, float]) -> None:
 
 
 def main() -> None:
+    # Run the command-line data, training, evaluation, and recommendation preview flow.
     parser = argparse.ArgumentParser(description="Train and evaluate the hybrid movie recommender.")
     parser.add_argument(
         "--csv",

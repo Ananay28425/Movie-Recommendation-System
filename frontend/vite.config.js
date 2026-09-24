@@ -1,3 +1,4 @@
+// Purpose: route local frontend API calls to the FastAPI development server.
 import { defineConfig } from 'vite'
 
 export default defineConfig({
