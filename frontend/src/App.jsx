@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
@@ -48,6 +48,12 @@ function App() {
     api('/api/health').then(() => setStatus('online')).catch(() => setStatus('offline'))
     load(54)
   }, [])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 4500)
+    return () => window.clearTimeout(timer)
+  }, [notice])
 
   function submit(event) {
     event.preventDefault()

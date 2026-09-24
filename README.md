@@ -35,22 +35,25 @@ Python 3.10+ and Node 20.19+ (or 22.12+) are recommended. From the repository ro
 
 ```bash
 python -m venv .venv
-# macOS/Linux:
-source .venv/bin/activate
-# Windows PowerShell:
-# .venv\Scripts\Activate.ps1
-pip install -r backend/requirements.txt
-cd backend
-uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-The **first start** downloads the official [MovieLens 100K archive](https://files.grouplens.org/datasets/movielens/ml-100k.zip), converts `u.data` and `u.item` into the local CSV, and trains the model. This takes longer than subsequent UI interactions. If the automatic download fails, download that archive manually into `data/ml-100k.zip` and restart the server. GroupLens [terms prohibit redistributing this dataset without separate permission](https://files.grouplens.org/datasets/movielens/ml-100k/README), so the archive and generated CSV are deliberately excluded from git. Keep your local copy under the dataset's terms. The app needs internet access once unless you supply the archive.
+Activate `.venv` with `.venv\Scripts\Activate.ps1` in PowerShell or `source .venv/bin/activate` on macOS/Linux. Then start the API:
+
+```bash
+python -m pip install -r backend/requirements.txt
+cd backend
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+The **first start** downloads the official [MovieLens 100K archive](https://files.grouplens.org/datasets/movielens/ml-100k.zip), converts `u.data` and `u.item` into the local CSV, and trains the model. This takes longer than subsequent UI interactions. If the automatic download fails, download that archive manually into `data/ml-100k.zip` and restart the server. GroupLens [terms prohibit redistributing this dataset without separate permission](https://files.grouplens.org/datasets/movielens/ml-100k/README), so the archive and generated CSV are deliberately excluded from git. Keep your local copy under the dataset's terms. The app needs internet access once unless you supply the archive. At startup it validates that the CSV contains the official 100,000 ratings, 943 users, and 1,682 movies. If an existing CSV fails this check, remove it and restart to fetch the official archive.
+
+The current tree omits the dataset. An older commit included a CSV at the repository root, so that file remains in Git history until the history is rewritten.
 
 In a second terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 

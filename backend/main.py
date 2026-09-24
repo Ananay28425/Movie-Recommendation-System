@@ -21,6 +21,8 @@ feedback_lock = Lock()
 async def lifespan(app: FastAPI):
     download_movielens_data(DATA_PATH)
     movies, ratings = load_movielens_data(DATA_PATH)
+    if len(ratings) != 100_000 or ratings["UserID"].nunique() != 943 or len(movies) != 1_682:
+        raise RuntimeError(f"{DATA_PATH} is not MovieLens 100K. Remove it and restart to download the official dataset.")
     app.state.model = HybridRecommender(movies, ratings)
     features = app.state.model.item_features.astype(float)
     lengths = np.linalg.norm(features, axis=1, keepdims=True)
