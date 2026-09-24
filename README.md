@@ -1,4 +1,4 @@
-# ADAPTIVE//MOVIES
+# Hybrid Movie Recommendation System
 
 A small full-stack MovieLens 100K recommender. A hybrid model ranks movies a user has not rated. **Like** or **Reject** a suggestion and its ranking changes immediately, without retraining the model. The interface shows the original model score, feedback adjustment, and final score for every recommendation.
 
